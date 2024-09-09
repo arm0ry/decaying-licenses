@@ -13,16 +13,16 @@ pragma solidity >=0.8.24;
 /// Anyone may reassess the eligibility of current license holder and effectuate necessary changes.
 
 struct License {
+    string subject; // provided by licensor
     uint256 price; // provided by licensee
     uint256 deposit; // provided by licensee
     address holder; // provided by licensee
-    uint40 rate; // provided by licensor, e.g., 10% per year
-    address licensor; // provided by licensor
-    uint40 term; // provided by licensor
-    string subject; // provided by licensor
     uint40 timeLastLicensed; // automated by contract
     uint40 timeLastCollected; // automated by contract
-    uint40 holderShares; // automated by contract
+    address licensor; // provided by licensor
+    uint40 rate; // provided by licensor, e.g., 10% per year
+    uint40 term; // provided by licensor
+    uint40 queuedShares; // automated by contract
 }
 
 struct Bid {
@@ -39,7 +39,8 @@ contract DecayingLicense {
 
     error Unauthorized();
     error InvalidLicense();
-    error InvalidLicenseAmount();
+    error InvalidAmount();
+    error InvalidBid();
     error InvalidBidAmount();
     error TransferFailed();
     error LicenseInUse();
@@ -48,24 +49,21 @@ contract DecayingLicense {
     /*                                  Storage.                                  */
     /* -------------------------------------------------------------------------- */
 
-    uint256 licenseId;
+    uint256 public licenseId;
 
-    mapping(uint256 licenseId => License license) licenses;
+    mapping(uint256 licenseId => License license) public licenses;
 
-    mapping(uint256 licenseId => Bid[]) bids;
+    mapping(uint256 licenseId => Bid[]) public bids;
 
     /* -------------------------------------------------------------------------- */
     /*                          Constructor & Modifiers.                          */
     /* -------------------------------------------------------------------------- */
 
-    modifier authorized(uint256 id) {
-        if (msg.sender != licenses[id].licensor) revert Unauthorized();
-        _;
-    }
-
     function draft(
         uint256 id,
         uint256 price,
+        uint256 rate,
+        uint256 term,
         string calldata content
     ) public payable {
         if (price == 0 || bytes(content).length == 0) revert InvalidLicense();
@@ -86,23 +84,29 @@ contract DecayingLicense {
         licenses[id].licensor = msg.sender;
 
         // TODO: Hardcoded.
-        licenses[id].rate = 10; // 10 / 10000
-        licenses[id].term = 1 weeks;
+        licenses[id].rate = uint40(rate); // x / 10000
+        licenses[id].term = uint40(term);
     }
 
     function bid(uint256 id, uint256 price) public payable {
         License memory $ = licenses[id];
         if (bytes($.subject).length == 0) revert InvalidLicense();
 
-        uint256 shares = sharesReverted(id);
+        uint256 reverted = sharesReverted(id);
+
+        if (reverted + $.queuedShares > 100) revert InvalidBid();
+        uint256 shares = reverted - $.queuedShares;
         if (msg.value > (price * shares) / 10000) revert InvalidBidAmount();
+        unchecked {
+            licenses[id].queuedShares += uint40(shares);
+        }
 
         bids[id].push(
             Bid({
                 price: price,
                 deposit: msg.value,
                 bidder: msg.sender,
-                shares: shares // TODO: Do we need this?
+                shares: shares
             })
         );
     }
@@ -131,7 +135,7 @@ contract DecayingLicense {
         if ($.timeLastLicensed == 0) {
             // Inaugural license.
             if ((price + price * $.rate) / 10000 > msg.value)
-                revert InvalidLicenseAmount();
+                revert InvalidAmount();
 
             licenses[id].price = price;
             licenses[id].deposit = msg.value - price;
@@ -144,8 +148,8 @@ contract DecayingLicense {
         } else if (
             block.timestamp > $.timeLastLicensed &&
             $.timeLastLicensed + $.term / 3 > block.timestamp
-            // Forced sell not possible. Still in use cycle.
         ) {
+            // Forced sell not possible. Still in use cycle.
             revert LicenseInUse();
         } else if (
             $.timeLastLicensed > 0 &&
@@ -155,16 +159,24 @@ contract DecayingLicense {
             // Forced sell possible. Use cycle passed.
             Bid memory _bid = getHighestBid(id);
 
+            if (_bid.bidder == address(0)) revert InvalidBid();
             licenses[id].price = _bid.price;
             licenses[id].deposit = _bid.deposit - _bid.price;
             licenses[id].holder = _bid.bidder;
 
             licenses[id].timeLastLicensed = uint40(block.timestamp);
+            delete licenses[id].queuedShares;
 
-            // Collect license charges.
+            // Collect license charges for previous licensor.
             bool success;
             uint256 collection = patronageOwed(id);
             if (collection >= $.deposit) {
+                // Terminate license.
+                delete licenses[id].price;
+                delete licenses[id].deposit;
+                delete licenses[id].holder;
+                delete licenses[id].queuedShares;
+
                 // Licensor collects new license price and previous deposit, if any.
                 (success, ) = $.licensor.call{value: _bid.price + $.deposit}(
                     ""
@@ -206,6 +218,7 @@ contract DecayingLicense {
                 delete licenses[id].price;
                 delete licenses[id].deposit;
                 delete licenses[id].holder;
+                delete licenses[id].queuedShares;
 
                 // Take deposit.
                 (bool success, ) = $.licensor.call{value: $.deposit}("");
@@ -248,9 +261,9 @@ contract DecayingLicense {
     /// @dev Helper function to calculate reverted shares.
     function sharesReverted(uint256 id) public view returns (uint256) {
         License memory $ = licenses[id];
-        uint256 shares = ((uint40(block.timestamp) - $.timeLastLicensed) /
-            $.term) * 10000;
-        return shares;
+        uint256 reverted = (((uint40(block.timestamp) - $.timeLastLicensed) *
+            100) / $.term);
+        return reverted;
     }
 
     /// @dev Helper function to calculate patronage owed.
@@ -281,6 +294,14 @@ contract DecayingLicense {
         }
 
         return $;
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                                 Public Get.                                */
+    /* -------------------------------------------------------------------------- */
+
+    function getLicense(uint256 id) public view returns (License memory) {
+        return licenses[id];
     }
 
     receive() external payable virtual {}

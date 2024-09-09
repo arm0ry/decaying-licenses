@@ -5,7 +5,7 @@ import "@forge/Test.sol";
 import "@forge/console2.sol";
 import "@solady/test/utils/mocks/MockERC6909.sol";
 
-import {DecayingLicense} from "../src/DecayingLicense.sol";
+import {DecayingLicense, License} from "../src/DecayingLicense.sol";
 
 contract DecayingLicenseTest is Test {
     DecayingLicense license;
@@ -19,11 +19,7 @@ contract DecayingLicenseTest is Test {
     address public immutable fox = payable(makeAddr("fox"));
 
     /// @dev Constants.
-    string internal constant NAME = "NAME";
-    string internal constant SYMBOL = "SYMBOL";
-    string internal constant WORK = "WORK";
-    uint256 internal constant MAXSUPPLY = 100;
-    uint64 internal constant SCALE = 0.0001 ether;
+    string internal constant TEST = "TEST";
     bytes internal constant BYTES = "BYTES";
 
     /// @dev Reserves.
@@ -35,6 +31,32 @@ contract DecayingLicenseTest is Test {
     /// @notice Set up the testing suite.
     function setUp() public payable {
         license = new DecayingLicense();
+    }
+
+    function test_Draft(uint256 id) public payable {
+        draft(id);
+    }
+
+    // TODO: test_License
+    // TODO: test_Update_License
+    // TODO: test_Bid
+
+    function draft(uint256 id) public payable {
+        vm.assume(id == 0);
+        uint256 _id = license.licenseId();
+
+        vm.prank(alice);
+        license.draft(id, 0.001 ether, 10, 1 weeks, TEST);
+
+        uint256 __id = license.licenseId();
+        assertEq(__id, _id + 1);
+
+        vm.warp(10000000);
+        uint256 reverted = license.sharesReverted(__id);
+        uint256 owed = license.patronageOwed(__id);
+        emit log_uint(owed);
+        emit log_uint(reverted);
+        emit log_uint(uint40(block.timestamp));
     }
 
     function testReceiveETH() public payable {
