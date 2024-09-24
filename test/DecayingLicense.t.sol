@@ -5,7 +5,7 @@ import "@forge/Test.sol";
 import "@forge/console2.sol";
 import "@solady/test/utils/mocks/MockERC6909.sol";
 
-import {DecayingLicense, License} from "../src/DecayingLicense.sol";
+import {DecayingLicense, Terms, Bid, Record} from "../src/DecayingLicense.sol";
 
 contract DecayingLicenseTest is Test {
     DecayingLicense license;
@@ -52,7 +52,7 @@ contract DecayingLicenseTest is Test {
         assertEq(__id, _id + 1);
 
         vm.warp(10000000);
-        uint256 reverted = license.sharesReverted(__id);
+        uint256 reverted = license.getLicensorShares(__id);
         uint256 owed = license.patronageOwed(__id);
         emit log_uint(owed);
         emit log_uint(reverted);

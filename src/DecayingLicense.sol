@@ -51,6 +51,7 @@ contract DecayingLicense {
     error InvalidAmount();
     error InvalidBid();
     error InvalidBidAmount();
+    error TooManyBids();
     error HigherAmountRequired();
     error TransferFailed();
     error LicenseInUse();
@@ -92,26 +93,9 @@ contract DecayingLicense {
             if ($.licensor != msg.sender) revert Unauthorized();
         }
 
-        _draft(id, price, rate, period, msg.sender, content);
-    }
-
-    function _draft(
-        uint256 id,
-        uint256 price,
-        uint256 rate,
-        uint256 period,
-        address licensor,
-        string calldata content
-    ) internal {
-        if (price == 0 || bytes(content).length == 0) revert InvalidLicense();
-
-        Terms memory $ = terms[id];
-
-        if ($.licensor != msg.sender) revert Unauthorized();
-
         terms[id].price = price;
         terms[id].content = content;
-        terms[id].licensor = licensor;
+        terms[id].licensor = msg.sender;
         terms[id].rate = uint40(rate); // x / 10000
         terms[id].period = uint40(period);
     }
@@ -137,7 +121,7 @@ contract DecayingLicense {
         }
 
         // Iterate bids and increment shares by current bidder.
-        uint256 bidId = isRepeatedBid(id, msg.sender);
+        uint256 bidId = getRepeatedBid(id, msg.sender);
         if (bidId > 0) {
             if (price > bids[id][bidId].price) revert HigherAmountRequired();
 
@@ -145,6 +129,7 @@ contract DecayingLicense {
             bids[id][bidId].deposit += msg.value;
             bids[id][bidId].shares += uint40(shares);
         } else {
+            if (bids[id].length == 10) revert TooManyBids();
             bids[id].push(
                 Bid({
                     bidder: msg.sender,
@@ -259,7 +244,7 @@ contract DecayingLicense {
     /*                                Collect Fees.                               */
     /* -------------------------------------------------------------------------- */
 
-    /// @dev .
+    /// @dev Collection is limited to licensors.
     function collect(uint256 id) public payable returns (uint256, uint256) {
         Terms memory _terms = terms[id];
         Record memory _record = records[id];
@@ -319,13 +304,15 @@ contract DecayingLicense {
     }
 
     /// @dev Helper function to calculate reverted shares.
-    function getLicensorShares(uint256 id) public view returns (uint256) {
+    function getLicensorShares(
+        uint256 id
+    ) public view returns (uint256 shares) {
         Terms memory _terms = terms[id];
         Record memory _record = records[id];
 
         // Return 0 if license is not active.
-        if (_record.timeLastCollected == 0) return 0;
-        return (((uint40(block.timestamp) - _record.timeLastLicensed) * 100) /
+        if (_record.timeLastCollected == 0) shares;
+        shares = (((uint40(block.timestamp) - _record.timeLastLicensed) * 100) /
             _terms.period);
     }
 
@@ -333,7 +320,7 @@ contract DecayingLicense {
     // credit: simondlr  https://github.com/simondlr/thisartworkisalwaysonsale/blob/master/packages/hardhat/contracts/v1/ArtStewardV2.sol
     function patronageOwed(
         uint256 id
-    ) internal view returns (uint256 patronageDue) {
+    ) public view returns (uint256 patronageDue) {
         Terms memory _terms = terms[id];
         Record memory _record = records[id];
 
@@ -346,8 +333,7 @@ contract DecayingLicense {
             365 days;
     }
 
-    function getHighestBid(uint256 id) public view returns (Bid memory) {
-        Bid memory $;
+    function getHighestBid(uint256 id) public view returns (Bid memory $) {
         Bid memory _$;
         uint256 length = bids[id].length;
         for (uint256 i; i < length; ++i) {
@@ -360,16 +346,15 @@ contract DecayingLicense {
         return $;
     }
 
-    // TODO:
-    function isRepeatedBid(
+    function getRepeatedBid(
         uint256 id,
         address bidder
-    ) public view returns (uint256) {
+    ) public view returns (uint256 bidId) {
         Bid memory $;
         uint256 length = bids[id].length;
         for (uint256 i; i != length; ++i) {
             $ = bids[id][i];
-            if ($.bidder == bidder) return i;
+            if ($.bidder == bidder) bidId = i;
         }
     }
 
