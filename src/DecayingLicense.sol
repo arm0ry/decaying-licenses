@@ -17,7 +17,7 @@ struct Terms {
     uint256 price; // future price never goes below price in terms
     string content;
     address licensor;
-    uint40 rate;
+    uint40 rate; // higher it is, faster license decays
     uint40 period;
 }
 
@@ -26,7 +26,7 @@ struct Bid {
     address bidder;
     uint40 shares;
     uint256 price;
-    uint256 deposit;
+    // uint256 deposit;
 }
 
 // managed by contract
@@ -74,12 +74,13 @@ contract DecayingLicense {
     error InvalidLicense();
     error InvalidPrice();
     error InvalidAmount();
-    error InvalidBid();
+    error ReadyToLicense();
     error InvalidBidAmount();
     error TooManyBids();
     error HigherPriceRequired();
     error TransferFailed();
     error LicenseInUse();
+    error NothingToCollect();
 
     /* -------------------------------------------------------------------------- */
     /*                                  Storage.                                  */
@@ -126,7 +127,7 @@ contract DecayingLicense {
             price: price,
             content: (bytes(content).length == 0) ? $.content : content,
             licensor: msg.sender,
-            rate: uint40(rate), // x / 10000
+            rate: uint40(rate), // 1-100
             period: uint40(period)
         });
 
@@ -142,69 +143,84 @@ contract DecayingLicense {
         // Check if licensable.
         if (bytes(_terms.content).length == 0) revert InvalidLicense();
 
-        // Check if total shares exceed 100.
-        uint256 licensorShares = getLicensorShares(id);
-        if (licensorShares == 100) revert InvalidBid();
+        // Check if total share reached 100.
+        uint256 decayed = getDecayedShares(id);
+        if (decayed == 10000) revert ReadyToLicense();
 
-        /// Check if bid amount matches `msg.value`.
-        uint256 shares = licensorShares - _record.bidderShares;
-        if (msg.value > (price * shares) / 10000) revert InvalidBidAmount();
+        // Check if price is higher than base price required in terms.
+        if (_terms.price > price) revert InvalidPrice();
 
+        uint256 shares;
         unchecked {
+            // Calculate shares bid by bidder.
+            shares = decayed - _record.bidderShares;
+
             // Increment shares owned by bidders.
             records[id].bidderShares += uint40(shares);
         }
 
-        // Iterate bids and increment shares by current bidder.
+        // Retrieve any previous bid by bidder.
         uint256 bidId = getRepeatedBid(id, msg.sender);
 
         Bid memory _bid;
         if (bidId > 0) {
-            if (price > bids[id][bidId].price) revert HigherPriceRequired();
+            // If previous bid exists, refund of difference in self-assessed fee is issued to bidder.
+            _bid = bids[id][bidId];
+
+            if (price > _bid.price) {
+                if (msg.value != price - _bid.price) revert InvalidBidAmount();
+            } else {
+                (bool success, ) = _bid.bidder.call{value: _bid.price - price}(
+                    ""
+                );
+                if (!success) revert TransferFailed();
+            }
 
             bids[id][bidId].price = price;
-            bids[id][bidId].deposit += msg.value;
+            // bids[id][bidId].deposit += msg.value;
             bids[id][bidId].shares += uint40(shares);
-
-            _bid = bids[id][bidId];
         } else {
-            if (bids[id].length == 10) revert TooManyBids();
+            if (bids[id].length == 100) revert TooManyBids();
+
+            /// Check if bid amount matches `msg.value`.
+            if (msg.value != price) revert InvalidBidAmount();
+
             _bid = Bid({
                 bidder: msg.sender,
                 shares: uint40(shares),
-                price: price,
-                deposit: msg.value
+                price: price
+                // deposit: msg.value
             });
             bids[id].push(_bid);
         }
 
-        emit BidSubmitted(id, _bid.bidder, _bid.price);
+        emit BidSubmitted(id, msg.sender, price);
     }
 
-    function deposit(uint256 id, uint256 bidId) public payable {
-        bool forLicense = (bidId == 0) ? true : false;
-        uint256 totalDeposit;
+    // function deposit(uint256 id, uint256 bidId) public payable {
+    //     bool forLicense = (bidId == 0) ? true : false;
+    //     uint256 totalDeposit;
 
-        if (forLicense) {
-            // Make license deposits.
-            Record memory $ = records[id];
-            if ($.licensee != msg.sender) revert Unauthorized();
+    //     if (forLicense) {
+    //         // Make license deposits.
+    //         Record memory $ = records[id];
+    //         if ($.licensee != msg.sender) revert Unauthorized();
 
-            unchecked {
-                totalDeposit = records[id].deposit += msg.value;
-            }
-        } else {
-            // Make bid deposits.
-            Bid memory $ = bids[id][bidId];
-            if ($.bidder != msg.sender) revert Unauthorized();
+    //         unchecked {
+    //             totalDeposit = records[id].deposit += msg.value;
+    //         }
+    //     } else {
+    //         // Make bid deposits.
+    //         Bid memory $ = bids[id][bidId];
+    //         if ($.bidder != msg.sender) revert Unauthorized();
 
-            unchecked {
-                totalDeposit = bids[id][bidId].deposit += msg.value;
-            }
-        }
+    //         unchecked {
+    //             totalDeposit = bids[id][bidId].deposit += msg.value;
+    //         }
+    //     }
 
-        emit Deposited(id, forLicense, totalDeposit);
-    }
+    //     emit Deposited(id, forLicense, totalDeposit);
+    // }
 
     function license(uint256 id, uint256 price) public payable {
         // Check if licensable.
@@ -212,13 +228,15 @@ contract DecayingLicense {
         Record memory _record = records[id];
         if (bytes(_terms.content).length == 0) revert InvalidLicense();
 
+        uint256 decayed = getDecayedShares(id);
+
+        // New or terminated licenses.
         if (_record.timeLastLicensed == 0) {
             // Check if price is higher than base price in terms.
             if (_terms.price > price) revert InvalidPrice();
 
-            // Check if `msg.value` is sufficient to cover license fees, price and patronage.
-            if ((price + price * _terms.rate) / 10000 > msg.value)
-                revert InvalidAmount();
+            // Check if `msg.value` is sufficient to cover license fee.
+            if (price != msg.value) revert InvalidAmount();
 
             // Transfer price to license to licensor.
             (bool success, ) = _terms.licensor.call{value: price}("");
@@ -227,84 +245,87 @@ contract DecayingLicense {
             // Record new license price, deposit, licensee, and license timestamp.
             _record = Record({
                 price: price,
-                deposit: msg.value - price,
+                deposit: msg.value,
                 licensee: msg.sender,
                 timeLastLicensed: uint40(block.timestamp),
                 timeLastCollected: uint40(block.timestamp),
                 bidderShares: 0
             });
             records[id] = _record;
-        } else if (
-            block.timestamp > _record.timeLastLicensed &&
-            _record.timeLastLicensed + _terms.period / 3 > block.timestamp
-        ) {
-            // Forced sell not possible.
-            // License remains in `use cycle` to ensure license holder has
-            // ample time to enjoy licensed content.
-            // `Use cycle` is hard-coded to first third of a license.
-            // Future iteration on current `use cycle` is expected.
-            revert LicenseInUse();
-        } else if (
-            _record.timeLastLicensed > 0 &&
-            _record.timeLastLicensed + _terms.period > block.timestamp &&
-            block.timestamp > _record.timeLastLicensed + _terms.period / 3
-        ) {
-            // `Use cycle` passed. Forced sell possible.
-            Bid memory _bid = getHighestBid(id);
+        } else {}
 
-            // If there is no highest bid, `msg.sender` may license directly.
-            if (_bid.bidder == address(0)) {
-                // Check if price is higher than base price in terms.
-                if (_terms.price > price) revert InvalidPrice();
-
-                // Check if `msg.value` is sufficient to cover license fees, price and patronage.
-                if ((price + price * _terms.rate) / 10000 > msg.value)
-                    revert InvalidAmount();
-
-                _bid.bidder = msg.sender;
-                _bid.price = price;
-                _bid.deposit = msg.value;
-            }
-
-            // Collect license fees from previous licensee.
-            bool success;
-            uint256 collection = patronageOwed(id);
-            if (collection >= _record.deposit) {
-                // Licensor collects new license price and previous deposit, if any.
-                (success, ) = _terms.licensor.call{
-                    value: _bid.price + _record.deposit
-                }("");
-                if (!success) revert TransferFailed();
+        // Active licenses.
+        if (_record.timeLastLicensed + _terms.period > block.timestamp) {
+            if (decayed >= 10000) {
+                // Forced sell possible when licensed rights have fully decayed.
+                _license(id, price, _record, _terms);
             } else {
-                // Licensor collects new license price and previous deposit, if any.
-                (success, ) = _terms.licensor.call{
-                    value: _bid.price + collection
-                }("");
-                if (!success) revert TransferFailed();
-
-                // Refund any deposit to previous license holder.
-                (success, ) = _record.licensee.call{
-                    value: _record.deposit - collection
-                }("");
-                if (!success) revert TransferFailed();
+                // Forced sell not possible.
+                // License remains in `use cycle` to ensure license holder has
+                // ample time to enjoy licensed content.
+                // Future iteration on current `use cycle` is expected.
+                revert LicenseInUse();
             }
-
-            // Record new license price, deposit, licensee, and license timestamp.
-            _record = Record({
-                price: _bid.price,
-                deposit: _bid.deposit - _bid.price,
-                licensee: _bid.bidder,
-                timeLastLicensed: uint40(block.timestamp),
-                timeLastCollected: uint40(block.timestamp),
-                bidderShares: 0
-            });
-            records[id] = _record;
-
-            // Refund all bids.
-            refundDeposits(id);
+        } else {
+            // Inactive licenses.
+            _license(id, price, _record, _terms);
         }
 
         emit Licensed(id, _record.licensee, _record.price);
+    }
+
+    function _license(
+        uint256 id,
+        uint256 price,
+        Record memory _record,
+        Terms memory _terms
+    ) internal {
+        // Collect past license fee, if any.
+        bool success;
+        uint256 collection = patronageOwed(id);
+        if (collection >= _record.deposit) {
+            // Licensor collects new license price and previous deposit, if any.
+            (success, ) = _terms.licensor.call{value: _record.deposit}("");
+            if (!success) revert TransferFailed();
+        } else {
+            // Licensor collects new license price and previous deposit, if any.
+            (success, ) = _terms.licensor.call{value: collection}("");
+            if (!success) revert TransferFailed();
+
+            // Refund any deposit to previous license holder.
+            (success, ) = _record.licensee.call{
+                value: _record.deposit - collection
+            }("");
+            if (!success) revert TransferFailed();
+        }
+
+        // If there is no highest bid, `msg.sender` may license directly.
+        Bid memory _bid = getHighestBid(id);
+        if (_bid.bidder == address(0)) {
+            // Check if price is higher than base price in terms.
+            if (_terms.price > price) revert InvalidPrice();
+
+            // Check if `msg.value` is sufficient to cover license fee.
+            if (price != msg.value) revert InvalidAmount();
+
+            _bid.bidder = msg.sender;
+            _bid.price = price;
+            // _bid.deposit = msg.value;
+        }
+
+        // Record new license price, deposit, licensee, and license timestamp.
+        _record = Record({
+            price: _bid.price,
+            deposit: _bid.price,
+            licensee: _bid.bidder,
+            timeLastLicensed: uint40(block.timestamp),
+            timeLastCollected: uint40(block.timestamp),
+            bidderShares: 0
+        });
+        records[id] = _record;
+
+        // Refund all bids.
+        refundDeposits(id);
     }
 
     /* -------------------------------------------------------------------------- */
@@ -320,16 +341,14 @@ contract DecayingLicense {
         if (collection > 0) {
             records[id].timeLastCollected = uint40(block.timestamp);
 
-            if (collection >= _record.deposit) {
-                // TODO: Check if this condition is actually executed.
-                // TODO: `license()` requires full patronage payment upgront so we may not even execute this at all.
+            if (collection > _record.deposit) {
                 collection = _record.deposit;
 
                 // Reset license.
-                records[id].price = _terms.price;
-                delete records[id].deposit;
-                delete records[id].licensee;
-                delete records[id].timeLastLicensed;
+                // records[id].price = _terms.price;
+                // delete records[id].deposit;
+                // delete records[id].licensee;
+                // delete records[id].timeLastLicensed;
 
                 // Take deposit.
                 (bool success, ) = _terms.licensor.call{value: collection}("");
@@ -341,6 +360,8 @@ contract DecayingLicense {
                 (bool success, ) = _terms.licensor.call{value: collection}("");
                 if (!success) revert TransferFailed();
             }
+        } else {
+            revert NothingToCollect();
         }
 
         emit Collected(id, collection);
@@ -356,17 +377,13 @@ contract DecayingLicense {
         for (uint256 i; i < length; ++i) {
             $ = bids[id][i];
 
-            if ($.deposit > 0) {
-                (bool success, ) = $.bidder.call{value: $.deposit}("");
-                if (!success) revert TransferFailed();
-            }
+            (bool success, ) = $.bidder.call{value: $.price}("");
+            if (!success) revert TransferFailed();
         }
     }
 
     /// @dev Helper function to calculate reverted shares.
-    function getLicensorShares(
-        uint256 id
-    ) public view returns (uint256 shares) {
+    function getDecayedShares(uint256 id) public view returns (uint256 shares) {
         Terms memory _terms = terms[id];
         Record memory _record = records[id];
 
@@ -374,7 +391,8 @@ contract DecayingLicense {
         if (_record.timeLastLicensed == 0) shares;
         unchecked {
             shares = (((uint40(block.timestamp) - _record.timeLastLicensed) *
-                100) / _terms.period);
+                _terms.rate *
+                10000) / _terms.period);
         }
     }
 
@@ -383,16 +401,14 @@ contract DecayingLicense {
     function patronageOwed(
         uint256 id
     ) public view returns (uint256 patronageDue) {
-        Terms memory _terms = terms[id];
         Record memory _record = records[id];
 
         // Return 0 if license is not active.
         if (_record.timeLastLicensed == 0) patronageDue;
         unchecked {
             patronageDue =
-                ((_record.price *
-                    (block.timestamp - _record.timeLastCollected)) *
-                    _terms.rate) /
+                (_record.price *
+                    (block.timestamp - _record.timeLastCollected)) /
                 10000 /
                 365 days;
         }
@@ -404,8 +420,12 @@ contract DecayingLicense {
         for (uint256 i; i < length; ++i) {
             _$ = bids[id][i];
 
-            if (_$.deposit > _$.price && _$.price > $.price) {
+            if (_$.price > $.price) {
                 $ = _$;
+            } else if (_$.price == $.price) {
+                (_$.shares > $.shares) ? $ = _$ : $;
+            } else {
+                $;
             }
         }
     }
