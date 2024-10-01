@@ -140,7 +140,7 @@ contract DecayingLicense {
     }
 
     function bid(uint256 id, uint256 price) public payable {
-        uint256 _deposit;
+        uint256 amount;
         Terms memory _terms = terms[id];
         Record memory _record = records[id];
 
@@ -164,46 +164,55 @@ contract DecayingLicense {
         }
 
         // Retrieve any previous bid by bidder.
-        uint256 bidId = getRepeatedBid(id, msg.sender);
+        uint256 bidId = getPastBid(id, msg.sender);
 
         Bid memory _bid;
-        if (bidId > 0) {
-            // If previous bid exists, refund of difference in self-assessed fee is issued to bidder.
-            _bid = bids[id][bidId];
 
-            shares += _bid.shares;
-            if ((price * shares) / 10000 > _bid.deposit) {
-                if (msg.value != (price * shares) / 10000 - _bid.deposit)
+        if (bidId != type(uint256).max) {
+            amount = (price * shares) / 10000;
+            // If previous bid exists, refund of difference in self-assessed fee is issued to bidder.
+            _bid = getBid(id, bidId);
+            emit BidSubmitted(bidId, msg.sender, price);
+
+            if (amount > _bid.deposit) {
+                emit BidSubmitted(bidId, msg.sender, _bid.deposit);
+                if (msg.value != amount - _bid.deposit)
                     revert InvalidBidAmount();
-                _deposit = msg.value;
             } else {
                 (bool success, ) = _bid.bidder.call{
-                    value: _bid.deposit - (price * shares) / 10000
+                    value: _bid.deposit - amount
                 }("");
                 if (!success) revert TransferFailed();
-                _deposit = 0;
             }
 
-            bids[id][bidId].price = price;
-            // bids[id][bidId].deposit += msg.value;
-            bids[id][bidId].shares += uint40(shares);
+            placeBid(
+                id,
+                bidId,
+                Bid({
+                    bidder: msg.sender,
+                    shares: _bid.shares + uint40(shares),
+                    price: price,
+                    deposit: amount
+                })
+            );
         } else {
             if (bids[id].length == 100) revert TooManyBids();
+            amount = (price * shares) / 10000;
 
             /// Check if bid amount matches `msg.value`.
-            if (msg.value != (price * shares) / 10000)
-                revert InvalidBidAmount();
+            if (msg.value != amount) revert InvalidBidAmount();
 
-            _bid = Bid({
-                bidder: msg.sender,
-                shares: uint40(shares),
-                price: price,
-                deposit: msg.value
-            });
-            bids[id].push(_bid);
+            placeBid(
+                id,
+                type(uint256).max,
+                Bid({
+                    bidder: msg.sender,
+                    shares: uint40(shares),
+                    price: price,
+                    deposit: amount
+                })
+            );
         }
-
-        emit BidSubmitted(id, msg.sender, price);
     }
 
     // function deposit(uint256 id, uint256 bidId) public payable {
@@ -436,15 +445,29 @@ contract DecayingLicense {
         }
     }
 
-    function getRepeatedBid(
+    function placeBid(uint256 id, uint256 bidId, Bid memory _bid) internal {
+        if (bidId == type(uint256).max) {
+            bids[id].push(_bid);
+        } else {
+            uint256 length = getNumOfBids(id);
+            for (uint256 i; i != length; ++i) {
+                (i == bidId) ? bids[id][i] = _bid : _bid;
+            }
+        }
+
+        emit BidSubmitted(id, _bid.bidder, _bid.price);
+    }
+
+    function getPastBid(
         uint256 id,
         address bidder
     ) public view returns (uint256 bidId) {
         Bid memory $;
-        uint256 length = bids[id].length;
+        uint256 length = getNumOfBids(id);
+        (length == 0) ? bidId = type(uint256).max : bidId;
         for (uint256 i; i != length; ++i) {
             $ = bids[id][i];
-            if ($.bidder == bidder) bidId = i;
+            ($.bidder == bidder) ? bidId = i : bidId = type(uint256).max;
         }
     }
 
@@ -468,7 +491,11 @@ contract DecayingLicense {
         uint256 id,
         uint256 bidId
     ) public view returns (Bid memory _bid) {
-        _bid = bids[id][bidId];
+        uint256 length = bids[id].length;
+
+        for (uint256 i; i != length; ++i) {
+            (i == bidId) ? _bid = bids[id][i] : _bid;
+        }
     }
 
     receive() external payable virtual {}
