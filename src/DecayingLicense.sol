@@ -149,7 +149,7 @@ contract DecayingLicense {
 
         // Check if total share reached 100.
         uint256 decayed = getDecayedShares(id);
-        if (decayed == 10000) revert ReadyToLicense();
+        if (decayed > 10000) revert ReadyToLicense();
 
         // Check if price is higher than base price required in terms.
         if (_terms.price > price) revert InvalidPrice();
@@ -172,10 +172,8 @@ contract DecayingLicense {
             amount = (price * shares) / 10000;
             // If previous bid exists, refund of difference in self-assessed fee is issued to bidder.
             _bid = getBid(id, bidId);
-            emit BidSubmitted(bidId, msg.sender, price);
 
             if (amount > _bid.deposit) {
-                emit BidSubmitted(bidId, msg.sender, _bid.deposit);
                 if (msg.value != amount - _bid.deposit)
                     revert InvalidBidAmount();
             } else {
