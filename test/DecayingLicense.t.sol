@@ -299,23 +299,192 @@ contract DecayingLicenseTest is Test {
         bid(id, echo, price, amount);
 
         // validate
-        uint256 _numOfBids = dLicense.getNumOfBids(id);
-        decayed = dLicense.getDecayedShares(id);
-        emit log_uint(decayed);
-        emit log_uint(_numOfBids);
+        uint256 numOfBids = dLicense.getNumOfBids(id);
+        assertEq(numOfBids, 3);
+
+        uint256 _decayed;
+        uint256 _balance;
         _bid = dLicense.getBid(id, 0);
-        emit log_uint(_bid.shares);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
         _bid = dLicense.getBid(id, 1);
-        emit log_uint(_bid.shares);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
         _bid = dLicense.getBid(id, 2);
-        emit log_uint(_bid.shares);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+
+        decayed = dLicense.getDecayedShares(id);
+        assertEq(_decayed, decayed);
+
         record = dLicense.getRecord(id);
-        emit log_uint(record.bidderShares);
+        assertEq(_decayed, record.bidderShares);
+        assertEq(address(dLicense).balance, _balance + record.deposit);
+    }
+
+    function test_Deposit() public payable {
+        // alice drafts license
+        uint256 rate = 2;
+        uint256 id = draft_new(FINNEY, rate, PERIOD, alice);
+
+        // david places a bid
+        vm.warp(200000);
+        vm.deal(david, 1 ether);
+        uint256 decayed = dLicense.getDecayedShares(id);
+        uint256 price = TWO_FINNEY + TWO_FINNEY;
+        record = dLicense.getRecord(id);
+        uint256 amount = (price * (decayed - record.bidderShares)) / 10000;
+        bid(id, david, price, amount);
+
+        // david deposits remainder to prepare bid to license
+        uint256 _deposit;
+        uint256 bidId; // bidId is 0
+        vm.warp(300500);
+        _bid = dLicense.getBid(id, bidId);
+        _deposit += _bid.deposit;
+        amount = _bid.price - _bid.deposit;
+        deposit(id, bidId, david, amount);
+        _bid = dLicense.getBid(id, bidId);
+        assertEq(_bid.deposit, _deposit + amount);
+        assertEq(address(dLicense).balance, _bid.deposit);
+    }
+
+    function test_License_WithBids() public payable {
+        // alice drafts license
+        uint256 rate = 2;
+        uint256 id = draft_new(FINNEY, rate, PERIOD, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+        uint256 prevBalance = address(dLicense).balance;
+
+        // charlie places first bid
+        vm.warp(10000);
+        vm.deal(charlie, 1 ether);
+        uint256 decayed = dLicense.getDecayedShares(id);
+        uint256 price = TWO_FINNEY + FINNEY;
+        uint256 amount = (price * decayed) / 10000;
+        bid(id, charlie, price, amount);
+
+        // david places second bid
+        vm.warp(200000);
+        vm.deal(david, 1 ether);
+        decayed = dLicense.getDecayedShares(id);
+        price = TWO_FINNEY + TWO_FINNEY;
+        record = dLicense.getRecord(id);
+        amount = (price * (decayed - record.bidderShares)) / 10000;
+        bid(id, david, price, amount);
+
+        // echo places third bid
+        vm.warp(300000);
+        vm.deal(echo, 1 ether);
+        decayed = dLicense.getDecayedShares(id);
+        price = TWO_FINNEY + TWO_FINNEY + FINNEY;
+        record = dLicense.getRecord(id);
+        amount = (price * (decayed - record.bidderShares)) / 10000;
+        bid(id, echo, price, amount);
+
+        // validate
+        uint256 numOfBids = dLicense.getNumOfBids(id);
+        assertEq(numOfBids, 3);
+
+        uint256 _decayed;
+        uint256 _balance;
+        _bid = dLicense.getBid(id, 0);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+        _bid = dLicense.getBid(id, 1);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+        _bid = dLicense.getBid(id, 2);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+
+        decayed = dLicense.getDecayedShares(id);
+        assertEq(_decayed, decayed);
+
+        record = dLicense.getRecord(id);
+        assertEq(_decayed, record.bidderShares);
+        assertEq(address(dLicense).balance, _balance + record.deposit);
 
         // fox licenses
         vm.warp(350000);
         vm.deal(fox, 1 ether);
-        license(id, fox, TWO_FINNEY + TWO_FINNEY + TWO_FINNEY);
+        license(id, fox, amount = TWO_FINNEY + TWO_FINNEY);
+
+        record = dLicense.getRecord(id);
+        assertEq(record.licensee, fox);
+        assertEq(record.bidderShares, 0);
+        assertEq(record.deposit, amount);
+    }
+
+    function test_License_WithBids_LicenseInUse() public payable {
+        // alice drafts license
+        uint256 rate = 2;
+        uint256 id = draft_new(FINNEY, rate, PERIOD, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+        uint256 prevBalance = address(dLicense).balance;
+
+        // charlie places first bid
+        vm.warp(10000);
+        vm.deal(charlie, 1 ether);
+        uint256 decayed = dLicense.getDecayedShares(id);
+        uint256 price = TWO_FINNEY + FINNEY;
+        uint256 amount = (price * decayed) / 10000;
+        bid(id, charlie, price, amount);
+
+        // david places second bid
+        vm.warp(200000);
+        vm.deal(david, 1 ether);
+        decayed = dLicense.getDecayedShares(id);
+        price = TWO_FINNEY + TWO_FINNEY;
+        record = dLicense.getRecord(id);
+        amount = (price * (decayed - record.bidderShares)) / 10000;
+        bid(id, david, price, amount);
+
+        // echo places third bid
+        vm.warp(300000);
+        vm.deal(echo, 1 ether);
+        decayed = dLicense.getDecayedShares(id);
+        price = TWO_FINNEY + TWO_FINNEY + FINNEY;
+        record = dLicense.getRecord(id);
+        amount = (price * (decayed - record.bidderShares)) / 10000;
+        bid(id, echo, price, amount);
+
+        // validate
+        uint256 numOfBids = dLicense.getNumOfBids(id);
+        assertEq(numOfBids, 3);
+
+        uint256 _decayed;
+        uint256 _balance;
+        _bid = dLicense.getBid(id, 0);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+        _bid = dLicense.getBid(id, 1);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+        _bid = dLicense.getBid(id, 2);
+        _decayed += _bid.shares;
+        _balance += _bid.deposit;
+
+        decayed = dLicense.getDecayedShares(id);
+        assertEq(_decayed, decayed);
+
+        record = dLicense.getRecord(id);
+        assertEq(_decayed, record.bidderShares);
+        assertEq(address(dLicense).balance, _balance + record.deposit);
+
+        // fox licenses
+        vm.warp(302000);
+        vm.deal(fox, 1 ether);
+        amount = TWO_FINNEY + TWO_FINNEY;
+        vm.prank(fox);
+        vm.expectRevert(DecayingLicense.LicenseInUse.selector);
+        dLicense.license{value: amount}(id, amount);
     }
 
     /* -------------------------------------------------------------------------- */
@@ -365,7 +534,15 @@ contract DecayingLicenseTest is Test {
         dLicense.bid{value: value}(id, price);
     }
 
-    function deposit() public payable {}
+    function deposit(
+        uint256 id,
+        uint256 bidId,
+        address bidder,
+        uint256 amount
+    ) public payable {
+        vm.prank(bidder);
+        dLicense.deposit{value: amount}(id, bidId);
+    }
 
     function license(
         uint256 id,
