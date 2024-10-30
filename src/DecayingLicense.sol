@@ -8,20 +8,22 @@ pragma solidity >=0.8.24;
 /// An onchain variation of Depreciating Licenses
 /// (https://inequality.stanford.edu/sites/default/files/Zhang-paper.pdf).
 ///
-/// A decaying license gradually and continuously reverts licensed rights back to its licensor.
-/// Draft terms to decaying licenses and collect licensing fees, price to license + patronage.
-/// Bid to license by paying licensing fees and self-assessing a new license price.
+/// Licensors set rate to decay license rights and sell short-term licenses.
+/// Decayed license rights revert to licensors faster with higher decay rate.
+/// Shorter licenses increase turnover and improve allocative efficiency.
+/// Licensees make prorated payment based on decay rate.
+/// Prospective licensees bid by self-assessing a new license price.
 
 // provided by licensor
 struct Terms {
-    uint256 price; // future price never goes below price in terms
+    uint256 price; // no bid may go below terms price
     string content;
     address licensor;
     uint40 rate; // higher it is, faster license decays
     uint40 period;
 }
 
-// provided by licensee
+// provided by bidder
 struct Bid {
     address bidder;
     uint40 shares;
@@ -77,7 +79,6 @@ contract DecayingLicense {
     error InvalidAmount();
     error ReadyToLicense();
     error InvalidBidAmount();
-    error TooManyBids();
     error HigherPriceRequired();
     error TransferFailed();
     error LicenseInUse();
@@ -87,13 +88,16 @@ contract DecayingLicense {
     /*                                  Storage.                                  */
     /* -------------------------------------------------------------------------- */
 
-    /// @notice
+    // Number of licenses.
     uint256 public licenseId;
 
+    // Mapping of licese terms by `licenseId`.
     mapping(uint256 id => Terms terms) public terms;
 
+    // Mappipng of license record by `licenseId`.
     mapping(uint256 id => Record record) public records;
 
+    // Mapping of bids by `licenseId`.
     mapping(uint256 id => Bid[]) public bids;
 
     /* -------------------------------------------------------------------------- */
@@ -120,18 +124,14 @@ contract DecayingLicense {
         } else {
             // Update previous license.
             if ($.licensor != msg.sender) revert Unauthorized();
-
-            // Licensors must draft new licenses to change base price and content.
-            price = $.price;
-            delete content;
         }
 
         $ = Terms({
             price: price,
             content: (bytes(content).length == 0) ? $.content : content,
             licensor: msg.sender,
-            rate: uint40(rate),
-            period: uint40(period)
+            rate: (rate == 0) ? $.rate : uint40(rate),
+            period: (period == 0) ? $.period : uint40(period)
         });
 
         terms[id] = $;
@@ -164,14 +164,15 @@ contract DecayingLicense {
         }
 
         // Retrieve any previous bid by bidder.
-        uint256 bidId = getPastBid(id, msg.sender);
+        uint256 bidId = getPastBidByBidder(id, msg.sender);
 
         Bid memory _bid;
 
         unchecked {
             if (bidId != type(uint256).max) {
+                // If previous bid exists, refund difference to bidder.
+                // Amount to refund is based on `price`.
                 amount = (price * shares) / 10000;
-                // If previous bid exists, refund of difference in self-assessed fee is issued to bidder.
                 _bid = getBid(id, bidId);
 
                 if (amount > _bid.deposit) {
@@ -195,10 +196,8 @@ contract DecayingLicense {
                     })
                 );
             } else {
-                if (bids[id].length == 100) revert TooManyBids();
-                amount = (price * shares) / 10000;
-
                 /// Check if bid amount matches `msg.value`.
+                amount = (price * shares) / 10000;
                 if (msg.value != amount) revert InvalidBidAmount();
 
                 placeBid(
@@ -216,8 +215,6 @@ contract DecayingLicense {
     }
 
     function deposit(uint256 id, uint256 bidId) public payable {
-        uint256 totalDeposit;
-
         // Make bid deposits.
         Bid memory $ = bids[id][bidId];
         if ($.bidder != msg.sender) revert Unauthorized();
@@ -227,9 +224,8 @@ contract DecayingLicense {
         if (decayed < 10000) {
             // If license is decaying, deposit may be made and recorded.
             unchecked {
-                totalDeposit = bids[id][bidId].deposit += msg.value;
+                emit Deposited(id, bidId, bids[id][bidId].deposit += msg.value);
             }
-            emit Deposited(id, bidId, totalDeposit);
         } else {
             // If it is not, license is available.
             revert ReadyToLicense();
@@ -242,14 +238,12 @@ contract DecayingLicense {
         Record memory _record = records[id];
         if (bytes(_terms.content).length == 0) revert InvalidLicense();
 
-        uint256 decayed = getDecayedShares(id);
-
         // New or terminated licenses.
         if (_record.timeLastLicensed == 0) {
             // Check if price is higher than base price in terms.
             if (_terms.price > price) revert InvalidPrice();
 
-            // Check if `msg.value` is sufficient to cover license fee.
+            // Check if `msg.value` is sufficient to cover `price`.
             if (price != msg.value) revert InvalidAmount();
 
             // Transfer price to license to licensor.
@@ -257,7 +251,7 @@ contract DecayingLicense {
             // if (!success) revert TransferFailed();
 
             // Record new license price, deposit, licensee, and license timestamp.
-            _record = Record({
+            records[id] = Record({
                 price: price,
                 deposit: msg.value,
                 licensee: msg.sender,
@@ -265,8 +259,8 @@ contract DecayingLicense {
                 timeLastCollected: uint40(block.timestamp),
                 bidderShares: 0
             });
-            records[id] = _record;
         } else if (_record.timeLastLicensed + _terms.period > block.timestamp) {
+            uint256 decayed = getDecayedShares(id);
             if (decayed >= 10000) {
                 // Forced sell possible when licensed rights have fully decayed.
                 _license(id, price, _record, _terms);
@@ -289,7 +283,7 @@ contract DecayingLicense {
         Record memory _record,
         Terms memory _terms
     ) internal {
-        // Collect past license fee, if any.
+        // Collect license fee, if any.
         bool success;
         uint256 collection = patronageOwed(id);
         if (collection >= _record.deposit) {
@@ -311,15 +305,11 @@ contract DecayingLicense {
         // If there is no highest bid, `msg.sender` may license directly.
         Bid memory _bid = getBestBid(id);
         if (_bid.bidder == address(0)) {
-            // Check if price is higher than base price in terms.
-            if (_terms.price > price) revert InvalidPrice();
-
             // Check if `msg.value` is sufficient to cover license fee.
             if (price != msg.value) revert InvalidAmount();
 
             _bid.bidder = msg.sender;
             _bid.price = price;
-            // _bid.deposit = msg.value;
         }
 
         // Record new license price, deposit, licensee, and license timestamp.
@@ -351,24 +341,25 @@ contract DecayingLicense {
         if (collection > 0) {
             records[id].timeLastCollected = uint40(block.timestamp);
 
-            if (collection > _record.deposit) {
-                collection = _record.deposit;
-
+            if (collection >= _record.deposit) {
                 // Reset license.
-                // records[id].price = _terms.price;
-                // delete records[id].deposit;
-                // delete records[id].licensee;
-                // delete records[id].timeLastLicensed;
+                records[id].price = _terms.price;
+                delete records[id].deposit;
+                delete records[id].licensee;
+                delete records[id].timeLastLicensed;
 
                 // Take deposit.
-                (bool success, ) = _terms.licensor.call{value: collection}("");
+                (bool success, ) = _terms.licensor.call{value: _record.deposit}(
+                    ""
+                );
                 if (!success) revert TransferFailed();
             } else {
-                records[id].deposit = _record.deposit - collection;
-
                 // Take collection.
                 (bool success, ) = _terms.licensor.call{value: collection}("");
                 if (!success) revert TransferFailed();
+
+                // Update deposit record.
+                records[id].deposit = _record.deposit - collection;
             }
         } else {
             revert NothingToCollect();
@@ -381,17 +372,6 @@ contract DecayingLicense {
     /*                                  Helpers.                                  */
     /* -------------------------------------------------------------------------- */
 
-    function refundDeposits(uint256 id) internal {
-        Bid memory $;
-        uint256 length = bids[id].length;
-        for (uint256 i; i < length; ++i) {
-            $ = bids[id][i];
-
-            (bool success, ) = $.bidder.call{value: $.deposit}("");
-            if (!success) revert TransferFailed();
-        }
-    }
-
     /// @dev Helper function to calculate reverted shares.
     function getDecayedShares(uint256 id) public view returns (uint256 shares) {
         Terms memory _terms = terms[id];
@@ -400,9 +380,11 @@ contract DecayingLicense {
         // Return 0 if license is not active.
         if (_record.timeLastLicensed == 0) shares;
         unchecked {
-            shares = (((uint40(block.timestamp) - _record.timeLastLicensed) *
-                _terms.rate *
-                10000) / _terms.period);
+            shares =
+                (10000 *
+                    _terms.rate *
+                    (uint40(block.timestamp) - _record.timeLastLicensed)) /
+                _terms.period;
         }
     }
 
@@ -415,12 +397,14 @@ contract DecayingLicense {
         Record memory _record = records[id];
 
         // Return 0 if license is not active.
-        if (_record.timeLastLicensed == 0) patronageDue;
         unchecked {
-            patronageDue =
-                (_record.price *
-                    (block.timestamp - _record.timeLastCollected)) /
-                _terms.period;
+            if (_record.timeLastLicensed == 0 || _terms.period == 0)
+                patronageDue;
+            else
+                patronageDue =
+                    (_record.price *
+                        (block.timestamp - _record.timeLastCollected)) /
+                    _terms.period;
         }
     }
 
@@ -440,6 +424,19 @@ contract DecayingLicense {
         }
     }
 
+    function getPastBidByBidder(
+        uint256 id,
+        address bidder
+    ) public view returns (uint256 bidId) {
+        Bid memory $;
+        uint256 length = getNumOfBids(id);
+        (length == 0) ? bidId = type(uint256).max : bidId;
+        for (uint256 i; i != length; ++i) {
+            $ = bids[id][i];
+            ($.bidder == bidder) ? bidId = i : bidId = type(uint256).max;
+        }
+    }
+
     function placeBid(uint256 id, uint256 bidId, Bid memory _bid) internal {
         if (bidId == type(uint256).max) {
             bids[id].push(_bid);
@@ -453,16 +450,14 @@ contract DecayingLicense {
         emit BidSubmitted(id, _bid.bidder, _bid.price);
     }
 
-    function getPastBid(
-        uint256 id,
-        address bidder
-    ) public view returns (uint256 bidId) {
+    function refundDeposits(uint256 id) internal {
         Bid memory $;
-        uint256 length = getNumOfBids(id);
-        (length == 0) ? bidId = type(uint256).max : bidId;
-        for (uint256 i; i != length; ++i) {
+        uint256 length = bids[id].length;
+        for (uint256 i; i < length; ++i) {
             $ = bids[id][i];
-            ($.bidder == bidder) ? bidId = i : bidId = type(uint256).max;
+
+            (bool success, ) = $.bidder.call{value: $.deposit}("");
+            if (!success) revert TransferFailed();
         }
     }
 
