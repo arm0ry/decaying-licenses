@@ -376,12 +376,12 @@ contract DecayingLicense {
         Record memory _record = records[id];
 
         // Return 0 if license is not active.
-        if (_record.timeLastLicensed == 0) shares;
+        if (_record.timeLastLicensed == 0 || _terms.period == 0) shares;
         unchecked {
             shares =
                 (10000 *
                     _terms.rate *
-                    (uint40(block.timestamp) - _record.timeLastLicensed)) /
+                    (block.timestamp - _record.timeLastLicensed)) /
                 _terms.period;
         }
     }

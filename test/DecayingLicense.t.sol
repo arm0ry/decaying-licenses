@@ -251,7 +251,15 @@ contract DecayingLicenseTest is Test {
         assertEq(record.bidderShares, _bid.shares);
     }
 
-    function test_Bid_Revert_InvalidLicense() public payable {
+    function test_Bid_Revert_InvalidLicense(uint256 id) public payable {
+        vm.expectRevert(DecayingLicense.InvalidLicense.selector);
+        dLicense.bid(id, TWO_FINNEY);
+    }
+
+    function test_Bid_Revert_ReadyToLicense(uint256 warpTo) public payable {
+        vm.assume(warpTo > ONE_WEEK);
+        vm.assume(1000000 weeks > warpTo);
+
         // alice drafts license
         uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
 
@@ -259,44 +267,32 @@ contract DecayingLicenseTest is Test {
         vm.deal(bob, 1 ether);
         license(id, bob, TWO_FINNEY);
 
-        // charlie places first bid
-        vm.warp(10000);
+        // charlie tries to bid
+        vm.warp(warpTo);
         vm.deal(charlie, 1 ether);
-        uint256 bidId = dLicense.getNumOfBids(id);
-        uint256 shares = dLicense.getDecayedShares(id);
-        uint256 price = TWO_FINNEY + FINNEY;
-        uint256 amount = (price * shares) / 10000;
-        bid(id, charlie, price, amount);
-
-        // validate
-        uint256 _bidId = dLicense.getNumOfBids(id);
-        _bid = dLicense.getBid(id, _bidId - 1);
-        assertEq(_bid.bidder, charlie);
-        assertEq(_bid.price, price);
-        assertEq(_bid.shares, shares);
-        assertEq(_bid.deposit, amount);
-        assertEq(++bidId, _bidId);
-
-        record = dLicense.getRecord(id);
-        assertEq(record.bidderShares, _bid.shares);
+        vm.expectRevert(DecayingLicense.ReadyToLicense.selector);
+        dLicense.bid{value: TWO_FINNEY + TWO_FINNEY}(
+            id,
+            TWO_FINNEY + TWO_FINNEY
+        );
     }
 
-    // TODO
-    function test_Bid_Revert_InvalidLicense() public payable {}
+    function test_Bid_Revert_InvalidPrice(uint256 price) public payable {
+        // draft
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+        _record = dLicense.getRecord(id);
 
-    // TODO
-    function test_Bid_Revert_ReadyToLicense() public payable {}
+        terms = dLicense.getTerms(id);
+        vm.deal(bob, 1 ether);
+        vm.assume(terms.price > price);
+        vm.assume(price > 0);
 
-    // TODO
-    function test_Bid_Revert_InvalidPrice() public payable {}
+        vm.prank(bob);
+        vm.expectRevert(DecayingLicense.InvalidPrice.selector);
+        dLicense.bid{value: price}(id, price);
+    }
 
-    // TODO
-    function test_Bid_Revert_InvalidNewBidAmount() public payable {}
-
-    // TODO
-    function test_Bid_Revert_InvalidUpdateBidAmount() public payable {}
-
-    function test_Bid_UpdateWithHigherBid() public payable {
+    function test_Bid_Update() public payable {
         // alice drafts license
         uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
 
@@ -338,6 +334,49 @@ contract DecayingLicenseTest is Test {
 
         record = dLicense.getRecord(id);
         assertEq(record.bidderShares, _bid.shares);
+    }
+
+    function test_Bid_Revert_InvalidNewBidAmount() public payable {
+        // alice drafts license
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+
+        // charlie submits first bid
+        vm.warp(1000);
+        vm.deal(charlie, 1 ether);
+        vm.prank(charlie);
+        vm.expectRevert(DecayingLicense.InvalidBidAmount.selector);
+        dLicense.bid{value: 0}(id, TWO_FINNEY + FINNEY);
+    }
+
+    function test_Bid_Revert_InvalidUpdateBidAmount() public payable {
+        // alice drafts license
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+
+        // charlie submits first bid
+        vm.warp(1000);
+        vm.deal(charlie, 1 ether);
+        uint256 shares = dLicense.getDecayedShares(id);
+        uint256 price = TWO_FINNEY + FINNEY;
+        uint256 amount = (price * shares) / 10000;
+        bid(id, charlie, price, amount);
+
+        // charlie submits second invalid bid (incorrect number of shares)
+        // correct calculation for `newBidAmount` is (price * (newBidshares - shares)) / 10000;
+        vm.warp(20000);
+        uint256 newBidshares = dLicense.getDecayedShares(id);
+        price += FINNEY;
+        uint256 newBidAmount = (price * (newBidshares)) / 10000;
+        vm.prank(charlie);
+        vm.expectRevert(DecayingLicense.InvalidBidAmount.selector);
+        dLicense.bid{value: newBidAmount - amount}(id, price);
     }
 
     function test_Bid_UpdateWithLowerBid() public payable {
