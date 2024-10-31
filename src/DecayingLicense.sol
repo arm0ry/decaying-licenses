@@ -238,17 +238,13 @@ contract DecayingLicense {
         Record memory _record = records[id];
         if (bytes(_terms.content).length == 0) revert InvalidLicense();
 
+        // Check if price is higher than base price in terms.
+        if (_terms.price > price) revert InvalidPrice();
+
         // New or terminated licenses.
         if (_record.timeLastLicensed == 0) {
-            // Check if price is higher than base price in terms.
-            if (_terms.price > price) revert InvalidPrice();
-
             // Check if `msg.value` is sufficient to cover `price`.
             if (price != msg.value) revert InvalidAmount();
-
-            // Transfer price to license to licensor.
-            // (bool success, ) = _terms.licensor.call{value: price}("");
-            // if (!success) revert TransferFailed();
 
             // Record new license price, deposit, licensee, and license timestamp.
             records[id] = Record({
@@ -342,6 +338,8 @@ contract DecayingLicense {
             records[id].timeLastCollected = uint40(block.timestamp);
 
             if (collection >= _record.deposit) {
+                collection = _record.deposit;
+
                 // Reset license.
                 records[id].price = _terms.price;
                 delete records[id].deposit;

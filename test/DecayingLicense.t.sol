@@ -79,10 +79,7 @@ contract DecayingLicenseTest is Test {
         dLicense.draft(licenseId, TWO_FINNEY, RATE, ONE_WEEK, "");
     }
 
-    function test_Draft_Revert_ZeroPrice(
-        uint256 rate,
-        uint256 period
-    ) public payable {
+    function test_Draft_Revert_ZeroPrice() public payable {
         uint256 licenseId = dLicense.licenseId();
         vm.prank(alice);
         vm.expectRevert(DecayingLicense.InvalidLicense.selector);
@@ -119,13 +116,12 @@ contract DecayingLicenseTest is Test {
     }
 
     function test_License_TermsPrice() public payable {
-        vm.deal(bob, 1 ether);
-
         // draft
-        uint256 id = draft_new(FINNEY, 1000, 1 weeks, alice);
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
         _record = dLicense.getRecord(id);
 
         terms = dLicense.getTerms(id);
+        vm.deal(bob, 1 ether);
         license(id, bob, terms.price);
 
         record = dLicense.getRecord(id);
@@ -138,7 +134,43 @@ contract DecayingLicenseTest is Test {
         assertEq(record.licensee, bob);
     }
 
-    function test_License_HigherPrice(uint256 rate) public payable {
+    function test_License_Revert_InvalidPrice(uint256 price) public payable {
+        // draft
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+        _record = dLicense.getRecord(id);
+
+        terms = dLicense.getTerms(id);
+        vm.deal(bob, 1 ether);
+        vm.assume(terms.price > price);
+        vm.assume(price > 0);
+
+        vm.prank(bob);
+        vm.expectRevert(DecayingLicense.InvalidPrice.selector);
+        dLicense.license{value: price}(id, price);
+    }
+
+    function test_License_Revert_InvalidLicense(uint256 id) public payable {
+        vm.expectRevert(DecayingLicense.InvalidLicense.selector);
+        dLicense.license(id, TWO_FINNEY);
+    }
+
+    function test_License_Revert_NewLicenseInvalidAmount(
+        uint256 price
+    ) public payable {
+        // draft
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+        _record = dLicense.getRecord(id);
+
+        terms = dLicense.getTerms(id);
+        vm.deal(bob, 1 ether);
+        vm.assume(price > terms.price);
+
+        vm.prank(bob);
+        vm.expectRevert(DecayingLicense.InvalidAmount.selector);
+        dLicense.license{value: 0}(id, price);
+    }
+
+    function test_DecayedLicense(uint256 rate) public payable {
         vm.assume(rate > 0);
         vm.assume(100 > rate);
         vm.deal(bob, 1 ether);
@@ -169,9 +201,25 @@ contract DecayingLicenseTest is Test {
     }
 
     // TODO
-    function test_License_LowerThanTermsPrice_Revert_InvalidPrice(
-        uint256 rate
-    ) public payable {}
+    function test_DecayedLicense_Revert_InvalidAmount() public payable {}
+
+    function test_License_Revert_LicenseInUse() public payable {
+        // alice drafts license
+        uint256 rate = 2;
+        uint256 id = draft_new(FINNEY, rate, ONE_WEEK, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+
+        // fox tries to license
+        vm.warp(302000);
+        vm.deal(fox, 1 ether);
+        uint256 amount = TWO_FINNEY + TWO_FINNEY;
+        vm.prank(fox);
+        vm.expectRevert(DecayingLicense.LicenseInUse.selector);
+        dLicense.license{value: amount}(id, amount);
+    }
 
     function test_Bid() public payable {
         // alice drafts license
@@ -202,6 +250,51 @@ contract DecayingLicenseTest is Test {
         record = dLicense.getRecord(id);
         assertEq(record.bidderShares, _bid.shares);
     }
+
+    function test_Bid_Revert_InvalidLicense() public payable {
+        // alice drafts license
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
+
+        // bob licenses
+        vm.deal(bob, 1 ether);
+        license(id, bob, TWO_FINNEY);
+
+        // charlie places first bid
+        vm.warp(10000);
+        vm.deal(charlie, 1 ether);
+        uint256 bidId = dLicense.getNumOfBids(id);
+        uint256 shares = dLicense.getDecayedShares(id);
+        uint256 price = TWO_FINNEY + FINNEY;
+        uint256 amount = (price * shares) / 10000;
+        bid(id, charlie, price, amount);
+
+        // validate
+        uint256 _bidId = dLicense.getNumOfBids(id);
+        _bid = dLicense.getBid(id, _bidId - 1);
+        assertEq(_bid.bidder, charlie);
+        assertEq(_bid.price, price);
+        assertEq(_bid.shares, shares);
+        assertEq(_bid.deposit, amount);
+        assertEq(++bidId, _bidId);
+
+        record = dLicense.getRecord(id);
+        assertEq(record.bidderShares, _bid.shares);
+    }
+
+    // TODO
+    function test_Bid_Revert_InvalidLicense() public payable {}
+
+    // TODO
+    function test_Bid_Revert_ReadyToLicense() public payable {}
+
+    // TODO
+    function test_Bid_Revert_InvalidPrice() public payable {}
+
+    // TODO
+    function test_Bid_Revert_InvalidNewBidAmount() public payable {}
+
+    // TODO
+    function test_Bid_Revert_InvalidUpdateBidAmount() public payable {}
 
     function test_Bid_UpdateWithHigherBid() public payable {
         // alice drafts license
@@ -380,6 +473,12 @@ contract DecayingLicenseTest is Test {
         assertEq(address(dLicense).balance, _bid.deposit);
     }
 
+    // TODO
+    function test_Deposit_Revert_Unauthorized() public payable {}
+
+    // TODO
+    function test_Deposit_Revert_ReadyToLicense() public payable {}
+
     function test_License_WithIneligibleBids() public payable {
         // alice drafts license
         uint256 rate = 2;
@@ -480,35 +579,18 @@ contract DecayingLicenseTest is Test {
         emit log_uint(address(dLicense).balance);
     }
 
-    function test_License_Revert_LicenseInUse() public payable {
+    function test_Collect_LicenseActive(uint256 warpTo) public payable {
+        vm.assume(warpTo > 1);
+        vm.assume(ONE_WEEK > warpTo);
+
         // alice drafts license
-        uint256 rate = 2;
-        uint256 id = draft_new(FINNEY, rate, ONE_WEEK, alice);
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
 
         // bob licenses
         vm.deal(bob, 1 ether);
         license(id, bob, TWO_FINNEY);
 
-        // fox tries to license
-        vm.warp(302000);
-        vm.deal(fox, 1 ether);
-        uint256 amount = TWO_FINNEY + TWO_FINNEY;
-        vm.prank(fox);
-        vm.expectRevert(DecayingLicense.LicenseInUse.selector);
-        dLicense.license{value: amount}(id, amount);
-    }
-
-    // TODO:
-    function test_Collect_LicenseActive() public payable {
-        // alice drafts license
-        uint256 rate = 2;
-        uint256 id = draft_new(FINNEY, rate, ONE_WEEK, alice);
-
-        // bob licenses
-        vm.deal(bob, 1 ether);
-        license(id, bob, TWO_FINNEY);
-
-        vm.warp(1000);
+        vm.warp(warpTo);
         record = dLicense.getRecord(id);
         uint256 collection = dLicense.patronageOwed(id);
         uint256 depositBeforeCollection = record.deposit;
@@ -516,31 +598,32 @@ contract DecayingLicenseTest is Test {
         dLicense.collect(id);
         record = dLicense.getRecord(id);
         assertEq(record.deposit, depositBeforeCollection - collection);
-        assertEq(record.timeLastCollected, 1000);
+        assertEq(record.timeLastCollected, warpTo);
         assertEq(record.timeLastLicensed, 1);
 
         collection = dLicense.patronageOwed(id);
         assertEq(collection, 0);
     }
 
-    // TODO:
-    function test_Collect_LicenseOverdue() public payable {
+    function test_Collect_LicenseOverdue(uint256 warpTo) public payable {
+        vm.assume(warpTo > ONE_WEEK);
+        vm.assume(1000000 weeks > warpTo);
+
         // alice drafts license
-        uint256 rate = 2;
-        uint256 id = draft_new(FINNEY, rate, ONE_WEEK, alice);
+        uint256 id = draft_new(FINNEY, RATE, ONE_WEEK, alice);
 
         // bob licenses
         vm.deal(bob, 1 ether);
         license(id, bob, TWO_FINNEY);
 
-        vm.warp(10000000000);
+        vm.warp(warpTo);
         record = dLicense.getRecord(id);
         uint256 collection = dLicense.patronageOwed(id);
 
         dLicense.collect(id);
         record = dLicense.getRecord(id);
         assertEq(record.deposit, 0);
-        assertEq(record.timeLastCollected, 10000000000);
+        assertEq(record.timeLastCollected, warpTo);
         assertEq(record.timeLastLicensed, 0);
 
         collection = dLicense.patronageOwed(id);
